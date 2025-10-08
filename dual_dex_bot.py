@@ -506,41 +506,58 @@ class DualDexTradingBot:
             self.logger.debug(f"WebSocket error type: {type(e).__name__}")
             return None
             
-    def _calculate_position_size(self, symbol: str, price: float, dex: str = "lighter") -> float:
-        """Calculate position size based on percentage of account balance - matches SDK implementation"""
+    def _calculate_hedged_position_sizes(self, symbol: str, lighter_price: float, pacifica_price: float) -> tuple[float, float]:
+        """Calculate hedged position sizes with equal notional values for both DEXes"""
         try:
             # Random percentage between min and max
             risk_percent = random.uniform(MIN_POSITION_PERCENT, MAX_POSITION_PERCENT)
             
-            # Use same balance limit for both DEXes to ensure equal position values
-            balance_limit = ACCOUNT_BALANCE
-            
             # Calculate risk amount in dollars
-            risk_amount = (risk_percent / 100) * balance_limit
+            risk_amount = (risk_percent / 100) * ACCOUNT_BALANCE
             
-            # Get leverage for this symbol (same as Lighter)
+            # Get leverage for this symbol
             leverage = MANUAL_LEVERAGE.get(symbol, 1.0)
             
-            # Calculate notional value we can afford with this leverage (same as Lighter)
-            max_notional_value = risk_amount * leverage
+            # Calculate target notional value
+            target_notional = risk_amount * leverage
             
-            # Calculate position size in units (same as Lighter)
-            position_size_units = max_notional_value / price
+            # Get Pacifica account balance to cap the notional
+            pacifica_cap = ACCOUNT_BALANCE * leverage  # Default fallback
+            try:
+                success, account_info = self._make_pacifica_request("/api/v1/account/info", {})
+                if success and account_info and 'account_value' in account_info:
+                    actual_balance = float(account_info['account_value'])
+                    pacifica_cap = actual_balance * leverage * 0.9  # 90% of actual balance with leverage
+                    self.logger.debug(f"Pacifica actual balance: ${actual_balance:.2f}, cap: ${pacifica_cap:.2f}")
+            except Exception as e:
+                self.logger.debug(f"Using fallback Pacifica cap: ${pacifica_cap:.2f}")
             
-            # Cap position size to prevent excessive exposure (same as Lighter)
-            max_affordable_notional = balance_limit * 0.8  # Max 80% of account as notional
-            if position_size_units * price > max_affordable_notional:
-                position_size_units = max_affordable_notional / price
-                self.logger.warning(f"Reduced position size for {symbol} due to risk limits")
+            # Use the smaller of target notional or Pacifica cap
+            hedged_notional = min(target_notional, pacifica_cap)
             
-            # Ensure minimum of 0.000001 units
-            position_size_units = max(position_size_units, 0.000001)
+            # Calculate position sizes for both DEXes
+            lighter_size = hedged_notional / lighter_price
+            pacifica_size = hedged_notional / pacifica_price
             
-            return position_size_units
-                
+            # Apply max exposure cap (80% of account balance)
+            max_affordable_notional = ACCOUNT_BALANCE * 0.8
+            if hedged_notional > max_affordable_notional:
+                hedged_notional = max_affordable_notional
+                lighter_size = hedged_notional / lighter_price
+                pacifica_size = hedged_notional / pacifica_price
+                self.logger.warning(f"Reduced hedged notional for {symbol} due to risk limits")
+            
+            # Ensure minimum sizes
+            lighter_size = max(lighter_size, 0.000001)
+            pacifica_size = max(pacifica_size, 0.000001)
+            
+            self.logger.debug(f"Hedged notional: ${hedged_notional:.2f}, Lighter: {lighter_size:.6f}, Pacifica: {pacifica_size:.6f}")
+            
+            return lighter_size, pacifica_size
+            
         except Exception as e:
-            self.logger.error(f"Failed to calculate position size: {e}")
-            return 0.001  # Fallback minimum
+            self.logger.error(f"Failed to calculate hedged position sizes: {e}")
+            return 0.001, 0.001  # Fallback minimums
             
     async def _check_and_close_existing_positions(self):
         """Check and close existing positions on both DEXes"""
@@ -906,9 +923,8 @@ class DualDexTradingBot:
                 
             self.logger.info(f"💰 Prices: Lighter=${lighter_price:.2f}, Pacifica=${pacifica_price:.2f}")
             
-            # Step 4: Calculate position sizes
-            lighter_size = self._calculate_position_size(symbol, lighter_price, "lighter")
-            pacifica_size = self._calculate_position_size(symbol, pacifica_price, "pacifica")
+            # Step 4: Calculate hedged position sizes (equal notional values)
+            lighter_size, pacifica_size = self._calculate_hedged_position_sizes(symbol, lighter_price, pacifica_price)
             
             self.logger.info(f"📏 Position sizes: Lighter={lighter_size:.6f}, Pacifica={pacifica_size:.6f}")
             
