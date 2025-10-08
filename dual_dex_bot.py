@@ -1221,8 +1221,11 @@ class DualDexTradingBot:
                 self.logger.error(f"Market not found for {symbol}")
                 return
             
-            max_attempts = 10
+            max_attempts = 20  # Increased attempts
             attempt = 0
+            
+            # Track current position size (starts with original, updates each iteration)
+            current_position_size = position_info['amount']
             
             while attempt < max_attempts:
                 attempt += 1
@@ -1242,16 +1245,18 @@ class DualDexTradingBot:
                 # Extract price_scaled and price_usd from result
                 price_scaled, price_usd = price_result
                     
-                # Calculate scaled amounts
+                # Calculate scaled amounts using CURRENT position size
                 size_decimals = market_details['size_decimals']
                 
-                base_amount_scaled = int(position_info['amount'] * (10 ** size_decimals))
+                base_amount_scaled = int(current_position_size * (10 ** size_decimals))
                 
-                # Add 1% buffer
-                base_amount_scaled = int(base_amount_scaled * 1.01)
+                # Add 2% buffer to ensure full close
+                base_amount_scaled = int(base_amount_scaled * 1.02)
                 
                 # Generate unique client order index
                 client_order_index = int(time.time() * 1000) % 1000000
+                
+                self.logger.info(f"🔄 Attempting to close {current_position_size:.8f} {symbol} (attempt {attempt})")
                 
                 # Place close order using correct method signature
                 created_order, tx_hash, error = await self.lighter_client.create_market_order(
@@ -1265,34 +1270,40 @@ class DualDexTradingBot:
                 
                 if error:
                     self.logger.error(f"❌ Failed to close Lighter position (attempt {attempt}): {error}")
+                    await asyncio.sleep(2)
+                    continue
                 else:
                     self.logger.info(f"✅ Lighter close order placed (attempt {attempt}): {tx_hash}")
                     
                     # Verify position is closed
                     await asyncio.sleep(POSITION_VERIFICATION_DELAY)
                     
-                    # Check if position still exists
+                    # Check remaining position and UPDATE current_position_size
                     account_api = lighter.AccountApi(self.lighter_api_client)
                     account_response = await account_api.account(by="index", value=str(LIGHTER_ACCOUNT_INDEX))
                     
                     position_still_exists = False
+                    remaining_size = 0.0
+                    
                     if hasattr(account_response, 'accounts') and account_response.accounts:
                         account = account_response.accounts[0]
                         if hasattr(account, 'positions') and account.positions:
                             for pos in account.positions:
                                 if pos.market_id == market['index']:
-                                    current_size = abs(float(pos.position))
-                                    if current_size > 1e-6:
+                                    remaining_size = abs(float(pos.position))
+                                    if remaining_size > 1e-6:
                                         position_still_exists = True
-                                        self.logger.warning(f"⚠️ Lighter position still open: {current_size} (attempt {attempt})")
+                                        # UPDATE the current position size for next attempt
+                                        current_position_size = remaining_size
+                                        self.logger.warning(f"⚠️ Lighter position still open: {remaining_size:.8f} (attempt {attempt})")
                                         break
                     
                     if not position_still_exists:
                         self.logger.info(f"✅ Lighter position fully closed for {symbol}")
                         return
                     
-                    # Wait before retry
-                    await asyncio.sleep(2)
+                    # Brief wait before retry with updated size
+                    await asyncio.sleep(1)
             
             self.logger.warning(f"⚠️ Reached max attempts ({max_attempts}) for closing Lighter {symbol}")
                 
