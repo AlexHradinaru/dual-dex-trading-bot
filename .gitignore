@@ -1,0 +1,137 @@
+# =============================================================================
+# DUAL DEX TRADING BOT - GITIGNORE
+# =============================================================================
+# Comprehensive exclusions for sensitive files and directories
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables and credentials
+.env
+.env.local
+.env.production
+.env.staging
+.flaskenv
+
+# IDE-specific files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+.atom/
+.brackets.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Process management
+.dual_dex_bot.pid
+*.pid
+
+# Trading data and backups
+data/
+backups/
+*.backup
+*.bak
+
+# Credentials and sensitive data
+*key*
+*secret*
+*credential*
+*private*
+*token*
+*password*
+
+# Node modules (if any)
+node_modules/
+
+# Cypress (if any)
+cypress/
+
+# Test files
+test_*.py
+debug_*.py
+*_test.py
+
+# Documentation builds
+docs/_build/
+site/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# Trading bot specific
+trading_data/
+positions/
+orders/
+trades/
