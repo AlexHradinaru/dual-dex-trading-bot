@@ -35,13 +35,13 @@ class DualDexBotManager:
         self.env_file = env_file
         
         # Create unique names based on env file
-        env_name = Path(env_file).stem  # e.g., ".env.account1" -> "env.account1"
-        if env_name == "env":  # Default .env
+        if env_file == ".env":  # Default .env
             self.pid_file = self.script_dir / ".dual_dex_bot.pid"
             self.log_file = self.script_dir / "dual_dex_bot.log"
         else:
             # Use env file name for unique PID and log files
-            safe_name = env_name.replace(".", "_")
+            # Remove leading dot and replace remaining dots with underscores
+            safe_name = env_file.lstrip('.').replace('.', '_')
             self.pid_file = self.script_dir / f".dual_dex_bot_{safe_name}.pid"
             self.log_file = self.script_dir / f"dual_dex_bot_{safe_name}.log"
         
@@ -96,9 +96,10 @@ class DualDexBotManager:
             return False
         
         try:
-            # Prepare environment with custom ENV_FILE variable
+            # Prepare environment with custom ENV_FILE and LOG_FILE variables
             env = os.environ.copy()
             env['DUAL_DEX_ENV_FILE'] = self.env_file
+            env['LOG_FILE'] = str(self.log_file)
             
             # Start the bot process
             process = subprocess.Popen(
