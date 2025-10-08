@@ -1311,34 +1311,46 @@ class DualDexTradingBot:
             # Determine close direction (opposite of open)
             close_side = "ask" if side == "buy" else "bid"
             
-            # Try multiple amounts in sequence, continuing until position is fully closed
-            test_amounts = [original_amount, "10.0", "5.0", "1.0", "0.5", "0.1", "0.01", "0.001"]
+            # Keep trying to close with progressively smaller amounts
+            # Start with large amounts and work down
+            close_amounts = [original_amount, "100.0", "50.0", "20.0", "10.0", "5.0", "1.0", "0.5", "0.1", "0.01"]
             
-            max_attempts = 20  # Maximum number of total close attempts
-            attempt_count = 0
+            max_total_attempts = 50  # Maximum number of total close attempts
+            total_attempts = 0
+            consecutive_failures = 0
+            max_consecutive_failures = len(close_amounts)  # If all amounts fail, position is closed
             
-            while attempt_count < max_attempts:
-                position_still_exists = False
-                
-                for amount in test_amounts:
-                    attempt_count += 1
-                    if attempt_count > max_attempts:
-                        break
+            self.logger.info(f"🔄 Starting continuous close loop for {symbol}...")
+            
+            while total_attempts < max_total_attempts:
+                # Try each amount
+                for amount in close_amounts:
+                    total_attempts += 1
                     
-                    if await self._attempt_close_pacifica_position(symbol, close_side, amount):
-                        self.logger.info(f"✅ Pacifica partial close successful (amount: {amount}, attempt {attempt_count})")
-                        position_still_exists = True
-                        await asyncio.sleep(2)  # Wait before checking again
-                        break  # Found a position, start over with larger amounts
+                    if total_attempts > max_total_attempts:
+                        self.logger.warning(f"⚠️ Reached max total attempts ({max_total_attempts}) for closing {symbol}")
+                        return
+                    
+                    # Attempt to close with this amount
+                    close_result = await self._attempt_close_pacifica_position(symbol, close_side, amount)
+                    
+                    if close_result:
+                        # Successfully placed and filled an order
+                        self.logger.info(f"✅ Pacifica closed {amount} {symbol} (attempt {total_attempts})")
+                        consecutive_failures = 0  # Reset failure counter
+                        await asyncio.sleep(1)  # Brief pause between successful closes
+                        break  # Start over with larger amounts
                     else:
-                        self.logger.debug(f"🔍 No position for {symbol} {close_side} amount: {amount}")
+                        # This amount didn't work, try next smaller amount
+                        self.logger.debug(f"🔍 Amount {amount} {symbol} didn't fill (attempt {total_attempts})")
+                        consecutive_failures += 1
                 
-                # If we went through all amounts and found nothing, position is fully closed
-                if not position_still_exists:
-                    self.logger.info(f"✅ Pacifica position fully closed for {symbol}")
+                # If all amounts failed consecutively, position is fully closed
+                if consecutive_failures >= max_consecutive_failures:
+                    self.logger.info(f"✅ Pacifica position fully closed for {symbol} (all amounts failed)")
                     return
             
-            self.logger.warning(f"⚠️ Reached max attempts ({max_attempts}) for closing {symbol}")
+            self.logger.warning(f"⚠️ Reached max attempts ({max_total_attempts}) for closing {symbol}")
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to close Pacifica position: {e}")
