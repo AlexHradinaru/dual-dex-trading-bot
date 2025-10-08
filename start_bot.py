@@ -29,11 +29,21 @@ from pathlib import Path
 class DualDexBotManager:
     """Process manager for dual DEX trading bot"""
     
-    def __init__(self):
+    def __init__(self, env_file: str = ".env"):
         self.script_dir = Path(__file__).parent
         self.bot_script = self.script_dir / "dual_dex_bot.py"
-        self.pid_file = self.script_dir / ".dual_dex_bot.pid"
-        self.log_file = self.script_dir / "dual_dex_bot.log"
+        self.env_file = env_file
+        
+        # Create unique names based on env file
+        env_name = Path(env_file).stem  # e.g., ".env.account1" -> "env.account1"
+        if env_name == "env":  # Default .env
+            self.pid_file = self.script_dir / ".dual_dex_bot.pid"
+            self.log_file = self.script_dir / "dual_dex_bot.log"
+        else:
+            # Use env file name for unique PID and log files
+            safe_name = env_name.replace(".", "_")
+            self.pid_file = self.script_dir / f".dual_dex_bot_{safe_name}.pid"
+            self.log_file = self.script_dir / f"dual_dex_bot_{safe_name}.log"
         
     def is_running(self) -> bool:
         """Check if the bot is currently running"""
@@ -71,7 +81,7 @@ class DualDexBotManager:
             print(f"❌ Bot is already running (PID: {self.get_pid()})")
             return False
         
-        print("🚀 Starting Dual DEX trading bot...")
+        print(f"🚀 Starting Dual DEX trading bot (env: {self.env_file})...")
         
         # Check if bot script exists
         if not self.bot_script.exists():
@@ -79,16 +89,22 @@ class DualDexBotManager:
             return False
         
         # Check if .env file exists
-        env_file = self.script_dir / ".env"
-        if not env_file.exists():
-            print("❌ .env file not found. Please copy env.example to .env and configure it.")
+        env_file_path = self.script_dir / self.env_file
+        if not env_file_path.exists():
+            print(f"❌ Env file not found: {env_file_path}")
+            print("Please create the env file with proper configuration.")
             return False
         
         try:
+            # Prepare environment with custom ENV_FILE variable
+            env = os.environ.copy()
+            env['DUAL_DEX_ENV_FILE'] = self.env_file
+            
             # Start the bot process
             process = subprocess.Popen(
                 [sys.executable, str(self.bot_script)],
                 cwd=str(self.script_dir),
+                env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True  # Detach from parent
@@ -103,8 +119,13 @@ class DualDexBotManager:
             
             if self.is_running():
                 print(f"✅ Bot started successfully (PID: {process.pid})")
-                print(f"📋 Use 'python3 start_bot.py logs' to view logs")
-                print(f"📋 Use 'python3 start_bot.py status' to check status")
+                print(f"📋 Log file: {self.log_file}")
+                if self.env_file != ".env":
+                    print(f"📋 Use 'python3 start_bot.py logs --env {self.env_file}' to view logs")
+                    print(f"📋 Use 'python3 start_bot.py status --env {self.env_file}' to check status")
+                else:
+                    print(f"📋 Use 'python3 start_bot.py logs' to view logs")
+                    print(f"📋 Use 'python3 start_bot.py status' to check status")
                 return True
             else:
                 print("❌ Bot failed to start. Check logs for details.")
@@ -247,11 +268,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python3 start_bot.py start     # Start the bot
-  python3 start_bot.py stop      # Stop the bot
-  python3 start_bot.py status    # Check if bot is running
-  python3 start_bot.py logs      # Follow logs in real-time
-  python3 start_bot.py restart   # Restart the bot
+  python3 start_bot.py start                          # Start with default .env
+  python3 start_bot.py start --env .env.account1      # Start with custom env
+  python3 start_bot.py start --env .env.account2      # Start second instance
+  python3 start_bot.py stop --env .env.account1       # Stop specific instance
+  python3 start_bot.py status                         # Check default instance
+  python3 start_bot.py logs --env .env.account1       # View logs for account1
+  python3 start_bot.py restart --env .env.account2    # Restart account2
         """
     )
     
@@ -262,6 +285,12 @@ Examples:
     )
     
     parser.add_argument(
+        '--env',
+        default='.env',
+        help='Path to environment file (default: .env). Use different files for multiple instances.'
+    )
+    
+    parser.add_argument(
         '--no-follow',
         action='store_true',
         help='For logs command: show recent logs instead of following'
@@ -269,7 +298,7 @@ Examples:
     
     args = parser.parse_args()
     
-    manager = DualDexBotManager()
+    manager = DualDexBotManager(env_file=args.env)
     
     if args.action == 'start':
         success = manager.start()

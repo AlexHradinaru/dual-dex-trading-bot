@@ -7,8 +7,9 @@ import os
 from typing import Dict, List
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Load environment variables from custom env file (if specified) or default .env
+env_file = os.getenv('DUAL_DEX_ENV_FILE', '.env')
+load_dotenv(dotenv_path=env_file)
 
 def get_env_str(key: str, default: str = "") -> str:
     """Get string environment variable"""

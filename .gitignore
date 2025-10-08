@@ -29,6 +29,7 @@ Thumbs.db
 
 # Environment variables and credentials
 .env
+.env.*
 .env.local
 .env.production
 .env.staging
