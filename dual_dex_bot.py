@@ -522,15 +522,18 @@ class DualDexTradingBot:
             target_notional = risk_amount * leverage
             
             # Get Pacifica account balance to cap the notional
-            pacifica_cap = ACCOUNT_BALANCE * leverage  # Default fallback
+            # Conservative fallback based on typical account balance (~$100-200)
+            pacifica_cap = 150.0 * leverage  # Conservative fallback: $150 * leverage
             try:
                 success, account_info = self._make_pacifica_request("/api/v1/account/info", {})
                 if success and account_info and 'account_value' in account_info:
                     actual_balance = float(account_info['account_value'])
                     pacifica_cap = actual_balance * leverage * 0.9  # 90% of actual balance with leverage
                     self.logger.debug(f"Pacifica actual balance: ${actual_balance:.2f}, cap: ${pacifica_cap:.2f}")
+                else:
+                    self.logger.debug(f"Using conservative Pacifica cap: ${pacifica_cap:.2f}")
             except Exception as e:
-                self.logger.debug(f"Using fallback Pacifica cap: ${pacifica_cap:.2f}")
+                self.logger.debug(f"Using conservative Pacifica cap: ${pacifica_cap:.2f}")
             
             # Use the smaller of target notional or Pacifica cap
             hedged_notional = min(target_notional, pacifica_cap)
@@ -1194,35 +1197,32 @@ class DualDexTradingBot:
             self.logger.error(f"❌ Failed to close Lighter position: {e}")
             
     async def _close_pacifica_position_by_info(self, position_info: Dict):
-        """Close Pacifica position using stored info"""
+        """Close Pacifica position using stored info - uses trial-and-error approach"""
         try:
             symbol = position_info['symbol']
             side = position_info['side']
-            amount = position_info['amount']
+            original_amount = position_info['amount']
             
             self.logger.info(f"🔒 Closing Pacifica position: {side.upper()} {symbol}")
             
             # Determine close direction (opposite of open)
             close_side = "ask" if side == "buy" else "bid"
             
-            # Create close order
-            close_params = {
-                "symbol": symbol,
-                "side": close_side,
-                "amount": amount,
-                "slippage_percent": str(DEFAULT_SLIPPAGE),
-                "reduce_only": True,
-                "client_order_id": str(uuid.uuid4())
-            }
+            # Try multiple amounts to ensure we close the actual position
+            test_amounts = [original_amount, "0.1", "0.01", "0.001", "1.0", "0.5"]
             
-            # Place close order
-            success, response = self._make_pacifica_request("/orders/create_market", close_params)
+            position_closed = False
+            for amount in test_amounts:
+                if await self._attempt_close_pacifica_position(symbol, close_side, amount):
+                    self.logger.info(f"✅ Pacifica position closed with amount: {amount}")
+                    position_closed = True
+                    break
+                else:
+                    self.logger.debug(f"🔍 No position found for {symbol} {close_side} amount: {amount}")
             
-            if success:
-                self.logger.info(f"✅ Pacifica position closed")
-            else:
-                self.logger.error(f"❌ Failed to close Pacifica position: {response}")
-            
+            if not position_closed:
+                self.logger.warning(f"⚠️ Could not close Pacifica position for {symbol}")
+                
         except Exception as e:
             self.logger.error(f"❌ Failed to close Pacifica position: {e}")
             
