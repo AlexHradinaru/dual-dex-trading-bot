@@ -115,6 +115,27 @@ python3 dual_dex_bot.py
 | `MIN_WAIT_BETWEEN_CYCLES` | Minimum wait between cycles (seconds) | 30 |
 | `MAX_WAIT_BETWEEN_CYCLES` | Maximum wait between cycles (seconds) | 120 |
 
+### Position Sizing (Hedged Notional)
+
+The bot sizes both sides to the same notional per cycle:
+
+1. Pick `risk_percent = uniform(MIN_POSITION_PERCENT, MAX_POSITION_PERCENT)`
+2. `risk_amount = ACCOUNT_BALANCE * (risk_percent / 100)`
+3. `leverage = MANUAL_LEVERAGE[symbol]`
+4. `target_notional = risk_amount * leverage`
+5. Query Pacifica account value (when available) and set
+   `pacifica_cap = account_value * leverage * 0.9`
+   - If not available, fallback to `pacifica_cap = ACCOUNT_BALANCE * leverage`
+6. `hedged_notional = min(target_notional, pacifica_cap)`
+7. Sizes:
+   - `lighter_size = hedged_notional / lighter_price`
+   - `pacifica_size = hedged_notional / pacifica_price`
+8. Safety and exchange constraints:
+   - Lot size rounding per DEX is applied at order time
+   - An additional risk cap may reduce `hedged_notional` (see logs for reductions)
+
+This ensures both DEX orders have matched exposure while respecting available balance and exchange limits.
+
 ### Leverage Settings
 
 Configure leverage per trading pair:
