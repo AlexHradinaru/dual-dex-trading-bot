@@ -507,7 +507,7 @@ class DualDexTradingBot:
             return None
             
     def _calculate_hedged_position_sizes(self, symbol: str, lighter_price: float, pacifica_price: float) -> tuple[float, float]:
-        """Calculate hedged position sizes with equal notional values for both DEXes"""
+        """Calculate hedged position sizes with equal notional values - Pacifica rounded first, Lighter matched"""
         try:
             # Random percentage between min and max
             risk_percent = random.uniform(MIN_POSITION_PERCENT, MAX_POSITION_PERCENT)
@@ -538,23 +538,41 @@ class DualDexTradingBot:
             # Use the smaller of target notional or Pacifica cap
             hedged_notional = min(target_notional, pacifica_cap)
             
-            # Calculate position sizes for both DEXes
-            lighter_size = hedged_notional / lighter_price
-            pacifica_size = hedged_notional / pacifica_price
-            
             # Apply max exposure cap (80% of account balance)
             max_affordable_notional = ACCOUNT_BALANCE * 0.8
             if hedged_notional > max_affordable_notional:
                 hedged_notional = max_affordable_notional
-                lighter_size = hedged_notional / lighter_price
-                pacifica_size = hedged_notional / pacifica_price
                 self.logger.warning(f"Reduced hedged notional for {symbol} due to risk limits")
+            
+            # STEP 1: Calculate Pacifica size and apply lot rounding FIRST
+            pacifica_size_raw = hedged_notional / pacifica_price
+            
+            # Apply Pacifica lot size rounding
+            lot_sizes = {
+                "BTC": 0.00001,
+                "ETH": 0.01,
+                "HYPE": 1.0,
+                "SOL": 0.01,
+                "BNB": 0.01,
+            }
+            lot_size = lot_sizes.get(symbol, 0.01)
+            pacifica_size = round(pacifica_size_raw / lot_size) * lot_size
+            pacifica_size = round(pacifica_size, 8)
+            pacifica_size = max(pacifica_size, lot_size)  # Ensure minimum lot size
+            
+            # STEP 2: Calculate actual notional value after Pacifica rounding
+            actual_notional = pacifica_size * pacifica_price
+            
+            # STEP 3: Calculate Lighter size to match the ACTUAL notional (not the target)
+            lighter_size = actual_notional / lighter_price
             
             # Ensure minimum sizes
             lighter_size = max(lighter_size, 0.000001)
             pacifica_size = max(pacifica_size, 0.000001)
             
-            self.logger.debug(f"Hedged notional: ${hedged_notional:.2f}, Lighter: {lighter_size:.6f}, Pacifica: {pacifica_size:.6f}")
+            self.logger.debug(f"Target notional: ${hedged_notional:.2f}, Actual notional: ${actual_notional:.2f}")
+            self.logger.debug(f"Lighter: {lighter_size:.6f} @ ${lighter_price:.2f} = ${lighter_size * lighter_price:.2f}")
+            self.logger.debug(f"Pacifica: {pacifica_size:.6f} @ ${pacifica_price:.2f} = ${pacifica_size * pacifica_price:.2f}")
             
             return lighter_size, pacifica_size
             
@@ -609,59 +627,90 @@ class DualDexTradingBot:
             self.logger.error(f"❌ Failed to check Lighter positions: {e}")
             
     async def _close_lighter_position(self, position):
-        """Close a specific Lighter position"""
+        """Close a specific Lighter position - continues until fully closed"""
         try:
             market_id = position.market_id
             position_size_float = float(position.position)
             
             self.logger.info(f"🔍 Closing Lighter position: {position.symbol} (size: {position_size_float})")
             
-            # Get market details
-            market_details = await self._get_lighter_market_details(market_id)
-            if not market_details:
-                self.logger.error(f"Could not get market details for market {market_id}")
-                return
+            max_attempts = 10
+            attempt = 0
+            
+            while attempt < max_attempts:
+                attempt += 1
                 
-            # Determine close direction
-            is_ask = position_size_float > 0  # Positive size = long position -> sell to close
-            price_result = await self._get_lighter_market_price(market_id, is_ask, market_details)
-            
-            if not price_result:
-                self.logger.error(f"Could not get market price for {position.symbol}")
-                return
+                # Get market details
+                market_details = await self._get_lighter_market_details(market_id)
+                if not market_details:
+                    self.logger.error(f"Could not get market details for market {market_id}")
+                    return
+                    
+                # Determine close direction
+                is_ask = position_size_float > 0  # Positive size = long position -> sell to close
+                price_result = await self._get_lighter_market_price(market_id, is_ask, market_details)
                 
-            # Extract price_scaled and price_usd from result
-            price_scaled, price_usd = price_result
+                if not price_result:
+                    self.logger.error(f"Could not get market price for {position.symbol}")
+                    return
+                    
+                # Extract price_scaled and price_usd from result
+                price_scaled, price_usd = price_result
+                    
+                # Calculate scaled amounts
+                size_decimals = market_details['size_decimals']
                 
-            # Calculate scaled amounts
-            size_decimals = market_details['size_decimals']
-            
-            base_amount_scaled = int(abs(position_size_float) * (10 ** size_decimals))
-            
-            # Add 1% buffer to ensure complete closure
-            base_amount_scaled = int(base_amount_scaled * 1.01)
-            
-            # Generate unique client order index
-            client_order_index = int(time.time() * 1000) % 1000000
-            
-            # Place close order using correct method signature
-            created_order, tx_hash, error = await self.lighter_client.create_market_order(
-                market_index=market_id,
-                client_order_index=client_order_index,
-                base_amount=base_amount_scaled,
-                avg_execution_price=price_scaled,
-                is_ask=is_ask,
-                reduce_only=True
-            )
-            
-            if error:
-                self.logger.error(f"❌ Failed to place Lighter close order: {error}")
-            else:
-                self.logger.info(f"✅ Lighter close order placed: {tx_hash}")
+                base_amount_scaled = int(abs(position_size_float) * (10 ** size_decimals))
                 
-                # Verify position is closed
-                await asyncio.sleep(POSITION_VERIFICATION_DELAY)
-                await self._verify_lighter_position_closed(market_id, position_size_float)
+                # Add 1% buffer to ensure complete closure
+                base_amount_scaled = int(base_amount_scaled * 1.01)
+                
+                # Generate unique client order index
+                client_order_index = int(time.time() * 1000) % 1000000
+                
+                # Place close order using correct method signature
+                created_order, tx_hash, error = await self.lighter_client.create_market_order(
+                    market_index=market_id,
+                    client_order_index=client_order_index,
+                    base_amount=base_amount_scaled,
+                    avg_execution_price=price_scaled,
+                    is_ask=is_ask,
+                    reduce_only=True
+                )
+                
+                if error:
+                    self.logger.error(f"❌ Failed to place Lighter close order (attempt {attempt}): {error}")
+                else:
+                    self.logger.info(f"✅ Lighter close order placed (attempt {attempt}): {tx_hash}")
+                    
+                    # Verify position is closed
+                    await asyncio.sleep(POSITION_VERIFICATION_DELAY)
+                    
+                    # Check if position still exists
+                    account_api = lighter.AccountApi(self.lighter_api_client)
+                    account_response = await account_api.account(by="index", value=str(LIGHTER_ACCOUNT_INDEX))
+                    
+                    position_still_exists = False
+                    if hasattr(account_response, 'accounts') and account_response.accounts:
+                        account = account_response.accounts[0]
+                        if hasattr(account, 'positions') and account.positions:
+                            for pos in account.positions:
+                                if pos.market_id == market_id:
+                                    current_size = float(pos.position)
+                                    if abs(current_size) > 1e-6:
+                                        position_still_exists = True
+                                        position_size_float = current_size  # Update for next attempt
+                                        self.logger.warning(f"⚠️ Lighter position still open: {current_size} (attempt {attempt})")
+                                        break
+                    
+                    if not position_still_exists:
+                        self.logger.info(f"✅ Lighter position fully closed for {position.symbol}")
+                        return
+                    
+                    # Wait before retry
+                    await asyncio.sleep(2)
+            
+            self.logger.warning(f"⚠️ Reached max attempts ({max_attempts}) for closing Lighter position")
             
         except Exception as e:
             self.logger.error(f"❌ Failed to close Lighter position: {e}")
@@ -746,14 +795,14 @@ class DualDexTradingBot:
             self.logger.error(f"❌ Failed to close Lighter position with opposite direction: {e}")
             
     async def _close_pacifica_positions(self):
-        """Close existing Pacifica positions"""
+        """Close existing Pacifica positions - continues until all fully closed"""
         try:
             self.logger.info("🔍 Checking Pacifica positions...")
             
             # Since Pacifica doesn't have a direct "get positions" endpoint,
             # we'll attempt to close common position types
             common_symbols = ALLOWED_TRADING_PAIRS.copy()
-            test_amounts = ["0.001", "0.01", "0.1", "1.0"]
+            test_amounts = ["10.0", "5.0", "1.0", "0.5", "0.1", "0.01", "0.001"]
             
             positions_found = 0
             
@@ -761,19 +810,17 @@ class DualDexTradingBot:
                 try:
                     self.logger.debug(f"🔍 Testing {symbol} for existing positions...")
                     
-                    # Try different amounts for long positions (sell to close)
-                    for amount in test_amounts:
-                        long_closed = await self._attempt_close_pacifica_position(symbol, "ask", amount)
-                        if long_closed:
-                            positions_found += 1
-                            self.logger.info(f"✅ Closed Pacifica long position: {symbol} ({amount})")
+                    # Close long positions (sell to close) - continue until fully closed
+                    long_closed_count = await self._fully_close_pacifica_position(symbol, "ask", test_amounts)
+                    if long_closed_count > 0:
+                        positions_found += long_closed_count
+                        self.logger.info(f"✅ Fully closed Pacifica long position: {symbol} ({long_closed_count} attempts)")
                             
-                    # Try different amounts for short positions (buy to close)
-                    for amount in test_amounts:
-                        short_closed = await self._attempt_close_pacifica_position(symbol, "bid", amount)
-                        if short_closed:
-                            positions_found += 1
-                            self.logger.info(f"✅ Closed Pacifica short position: {symbol} ({amount})")
+                    # Close short positions (buy to close) - continue until fully closed
+                    short_closed_count = await self._fully_close_pacifica_position(symbol, "bid", test_amounts)
+                    if short_closed_count > 0:
+                        positions_found += short_closed_count
+                        self.logger.info(f"✅ Fully closed Pacifica short position: {symbol} ({short_closed_count} attempts)")
                 
                 except Exception as e:
                     self.logger.debug(f"Error testing {symbol}: {e}")
@@ -781,10 +828,32 @@ class DualDexTradingBot:
             if positions_found == 0:
                 self.logger.info("✅ No open Pacifica positions found")
             else:
-                self.logger.info(f"✅ Closed {positions_found} Pacifica positions")
+                self.logger.info(f"✅ Closed Pacifica positions with {positions_found} total closes")
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to check Pacifica positions: {e}")
+            
+    async def _fully_close_pacifica_position(self, symbol: str, side: str, test_amounts: list) -> int:
+        """Fully close a Pacifica position - continues until nothing remains"""
+        close_count = 0
+        max_attempts = 20
+        
+        while close_count < max_attempts:
+            position_found = False
+            
+            for amount in test_amounts:
+                if await self._attempt_close_pacifica_position(symbol, side, amount):
+                    close_count += 1
+                    self.logger.debug(f"🔍 Pacifica close #{close_count} for {symbol} {side} (amount: {amount})")
+                    position_found = True
+                    await asyncio.sleep(2)  # Wait before next attempt
+                    break  # Start over with larger amounts
+            
+            # If no position found with any amount, it's fully closed
+            if not position_found:
+                break
+        
+        return close_count
             
     async def _attempt_close_pacifica_position(self, symbol: str, side: str, amount: str) -> bool:
         """Attempt to close a Pacifica position"""
@@ -1134,7 +1203,7 @@ class DualDexTradingBot:
             self.logger.error(f"❌ Failed to close positions: {e}")
             
     async def _close_lighter_position_by_info(self, position_info: Dict):
-        """Close Lighter position using stored info"""
+        """Close Lighter position using stored info - continues until fully closed"""
         try:
             symbol = position_info['symbol']
             side = position_info['side']
@@ -1151,53 +1220,87 @@ class DualDexTradingBot:
             if not market:
                 self.logger.error(f"Market not found for {symbol}")
                 return
+            
+            max_attempts = 10
+            attempt = 0
+            
+            while attempt < max_attempts:
+                attempt += 1
                 
-            # Get market details
-            market_details = await self._get_lighter_market_details(market['index'])
-            if not market_details:
-                return
+                # Get market details
+                market_details = await self._get_lighter_market_details(market['index'])
+                if not market_details:
+                    return
+                    
+                # Determine close direction (opposite of open)
+                is_ask = (side == "buy")  # If we bought, we need to sell to close
+                price_result = await self._get_lighter_market_price(market['index'], is_ask, market_details)
                 
-            # Determine close direction (opposite of open)
-            is_ask = (side == "buy")  # If we bought, we need to sell to close
-            price_result = await self._get_lighter_market_price(market['index'], is_ask, market_details)
-            
-            if not price_result:
-                return
+                if not price_result:
+                    return
+                    
+                # Extract price_scaled and price_usd from result
+                price_scaled, price_usd = price_result
+                    
+                # Calculate scaled amounts
+                size_decimals = market_details['size_decimals']
                 
-            # Extract price_scaled and price_usd from result
-            price_scaled, price_usd = price_result
+                base_amount_scaled = int(position_info['amount'] * (10 ** size_decimals))
                 
-            # Calculate scaled amounts
-            size_decimals = market_details['size_decimals']
+                # Add 1% buffer
+                base_amount_scaled = int(base_amount_scaled * 1.01)
+                
+                # Generate unique client order index
+                client_order_index = int(time.time() * 1000) % 1000000
+                
+                # Place close order using correct method signature
+                created_order, tx_hash, error = await self.lighter_client.create_market_order(
+                    market_index=market['index'],
+                    client_order_index=client_order_index,
+                    base_amount=base_amount_scaled,
+                    avg_execution_price=price_scaled,
+                    is_ask=is_ask,
+                    reduce_only=True
+                )
+                
+                if error:
+                    self.logger.error(f"❌ Failed to close Lighter position (attempt {attempt}): {error}")
+                else:
+                    self.logger.info(f"✅ Lighter close order placed (attempt {attempt}): {tx_hash}")
+                    
+                    # Verify position is closed
+                    await asyncio.sleep(POSITION_VERIFICATION_DELAY)
+                    
+                    # Check if position still exists
+                    account_api = lighter.AccountApi(self.lighter_api_client)
+                    account_response = await account_api.account(by="index", value=str(LIGHTER_ACCOUNT_INDEX))
+                    
+                    position_still_exists = False
+                    if hasattr(account_response, 'accounts') and account_response.accounts:
+                        account = account_response.accounts[0]
+                        if hasattr(account, 'positions') and account.positions:
+                            for pos in account.positions:
+                                if pos.market_id == market['index']:
+                                    current_size = abs(float(pos.position))
+                                    if current_size > 1e-6:
+                                        position_still_exists = True
+                                        self.logger.warning(f"⚠️ Lighter position still open: {current_size} (attempt {attempt})")
+                                        break
+                    
+                    if not position_still_exists:
+                        self.logger.info(f"✅ Lighter position fully closed for {symbol}")
+                        return
+                    
+                    # Wait before retry
+                    await asyncio.sleep(2)
             
-            base_amount_scaled = int(position_info['amount'] * (10 ** size_decimals))
-            
-            # Add 1% buffer
-            base_amount_scaled = int(base_amount_scaled * 1.01)
-            
-            # Generate unique client order index
-            client_order_index = int(time.time() * 1000) % 1000000
-            
-            # Place close order using correct method signature
-            created_order, tx_hash, error = await self.lighter_client.create_market_order(
-                market_index=market['index'],
-                client_order_index=client_order_index,
-                base_amount=base_amount_scaled,
-                avg_execution_price=price_scaled,
-                is_ask=is_ask,
-                reduce_only=True
-            )
-            
-            if error:
-                self.logger.error(f"❌ Failed to close Lighter position: {error}")
-            else:
-                self.logger.info(f"✅ Lighter position closed: {tx_hash}")
+            self.logger.warning(f"⚠️ Reached max attempts ({max_attempts}) for closing Lighter {symbol}")
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to close Lighter position: {e}")
             
     async def _close_pacifica_position_by_info(self, position_info: Dict):
-        """Close Pacifica position using stored info - uses trial-and-error approach"""
+        """Close Pacifica position using stored info - continues until fully closed"""
         try:
             symbol = position_info['symbol']
             side = position_info['side']
@@ -1208,20 +1311,34 @@ class DualDexTradingBot:
             # Determine close direction (opposite of open)
             close_side = "ask" if side == "buy" else "bid"
             
-            # Try multiple amounts to ensure we close the actual position
-            test_amounts = [original_amount, "0.1", "0.01", "0.001", "1.0", "0.5"]
+            # Try multiple amounts in sequence, continuing until position is fully closed
+            test_amounts = [original_amount, "10.0", "5.0", "1.0", "0.5", "0.1", "0.01", "0.001"]
             
-            position_closed = False
-            for amount in test_amounts:
-                if await self._attempt_close_pacifica_position(symbol, close_side, amount):
-                    self.logger.info(f"✅ Pacifica position closed with amount: {amount}")
-                    position_closed = True
-                    break
-                else:
-                    self.logger.debug(f"🔍 No position found for {symbol} {close_side} amount: {amount}")
+            max_attempts = 20  # Maximum number of total close attempts
+            attempt_count = 0
             
-            if not position_closed:
-                self.logger.warning(f"⚠️ Could not close Pacifica position for {symbol}")
+            while attempt_count < max_attempts:
+                position_still_exists = False
+                
+                for amount in test_amounts:
+                    attempt_count += 1
+                    if attempt_count > max_attempts:
+                        break
+                    
+                    if await self._attempt_close_pacifica_position(symbol, close_side, amount):
+                        self.logger.info(f"✅ Pacifica partial close successful (amount: {amount}, attempt {attempt_count})")
+                        position_still_exists = True
+                        await asyncio.sleep(2)  # Wait before checking again
+                        break  # Found a position, start over with larger amounts
+                    else:
+                        self.logger.debug(f"🔍 No position for {symbol} {close_side} amount: {amount}")
+                
+                # If we went through all amounts and found nothing, position is fully closed
+                if not position_still_exists:
+                    self.logger.info(f"✅ Pacifica position fully closed for {symbol}")
+                    return
+            
+            self.logger.warning(f"⚠️ Reached max attempts ({max_attempts}) for closing {symbol}")
                 
         except Exception as e:
             self.logger.error(f"❌ Failed to close Pacifica position: {e}")
